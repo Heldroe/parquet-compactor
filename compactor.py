@@ -34,8 +34,12 @@ def get_current_watermark(con):
     try:
         res = con.execute(f"SELECT column0 FROM read_csv_auto('{full_watermark_path}', header=false)").fetchone()
 
-        # Parse the string and explicitly make it a timezone-aware UTC datetime
-        raw_time = datetime.strptime(res[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        val = res[0]
+        if isinstance(val, str):
+            raw_time = datetime.strptime(val, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        else:
+            raw_time = val.replace(tzinfo=timezone.utc)
+
         snapped_time = raw_time.replace(minute=0, second=0, microsecond=0)
 
         if raw_time != snapped_time:
@@ -45,7 +49,6 @@ def get_current_watermark(con):
 
     except Exception as e:
         error_msg = str(e)
-        # Check if the error is genuinely because the file doesn't exist (404 / NoSuchKey)
         if "404" not in error_msg and "NoSuchKey" not in error_msg and "No files found" not in error_msg:
             print(f"❌ Fatal Error accessing watermark file: {error_msg}")
             raise e
@@ -58,7 +61,6 @@ def get_current_watermark(con):
             ORDER BY file ASC
             LIMIT 1
         """
-        # If auto-discovery fails due to credentials, this will natively raise the 403 error
         first_file = con.execute(query).fetchone()
 
         if not first_file:
@@ -79,7 +81,7 @@ def get_current_watermark(con):
 
 def update_watermark(con, new_time_str):
     full_watermark_path = f"s3://{BUCKET}{WATERMARK_PATH}"
-    con.execute(f"COPY (SELECT '{new_time_str}') TO '{full_watermark_path}' (FORMAT CSV);")
+    con.execute(f"COPY (SELECT '{new_time_str}') TO '{full_watermark_path}' (FORMAT CSV, HEADER FALSE);")
     print(f"✅ Watermark updated to {new_time_str}")
 
 def main():
