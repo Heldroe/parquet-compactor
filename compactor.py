@@ -5,7 +5,8 @@ import re
 import duckdb
 
 
-S3_ENDPOINT = os.getenv("S3_ENDPOINT")
+raw_endpoint = os.getenv("S3_ENDPOINT")
+S3_ENDPOINT = re.sub(r"^https?://", "", raw_endpoint).rstrip("/") if raw_endpoint else None
 S3_REGION = os.getenv("S3_REGION")
 BUCKET = os.getenv("BUCKET_NAME", "logs-heormv0t")
 WATERMARK_PATH = os.getenv("WATERMARK_PATH", "/watermark.csv")
