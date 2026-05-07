@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import os
 import re
 
+import boto3
 import duckdb
 
 
@@ -10,15 +11,35 @@ S3_ENDPOINT = re.sub(r"^https?://", "", raw_endpoint).rstrip("/") if raw_endpoin
 S3_REGION = os.getenv("S3_REGION")
 BUCKET = os.getenv("BUCKET_NAME", "logs-heormv0t")
 WATERMARK_PATH = os.getenv("WATERMARK_PATH", "/watermark.csv")
-
 CATEGORIES_ENV = os.getenv("CATEGORIES", "containers")
 CATEGORIES = [c.strip() for c in CATEGORIES_ENV.split(",") if c.strip()]
+DELETE_RAW_FILES = os.getenv("DELETE_RAW_FILES", "false").lower() in ("true", "1", "yes")
+
+
+s3_client = None
+if DELETE_RAW_FILES:
+    boto3_kwargs = {}
+    if raw_endpoint:
+        boto3_kwargs['endpoint_url'] = f"https://{S3_ENDPOINT}"
+    if S3_REGION:
+        boto3_kwargs['region_name'] = S3_REGION
+
+    print("🧹 Raw file deletion is ENABLED. Initializing boto3 client...")
+    s3_client = boto3.client('s3', **boto3_kwargs)
+else:
+    print("🛡️ Raw file deletion is DISABLED. Set DELETE_RAW_FILES=true to enable.")
+
 
 def setup_duckdb():
     print("Initializing DuckDB and loading pre-installed extensions...")
     con = duckdb.connect(':memory:')
     con.execute("LOAD httpfs;")
     con.execute("LOAD aws;")
+
+    con.execute("SET threads = 2;")
+    con.execute("SET http_retries = 3;")
+    con.execute("SET http_retry_wait_ms = 500;")
+    con.execute("SET http_retry_backoff = 2;")
 
     if S3_ENDPOINT:
         con.execute(f"SET s3_endpoint='{S3_ENDPOINT}';")
@@ -28,6 +49,7 @@ def setup_duckdb():
 
     con.execute("CALL load_aws_credentials();")
     return con
+
 
 def get_current_watermark(con):
     full_watermark_path = f"s3://{BUCKET}{WATERMARK_PATH}"
@@ -84,6 +106,25 @@ def update_watermark(con, new_time_str):
     con.execute(f"COPY (SELECT '{new_time_str}') TO '{full_watermark_path}' (FORMAT CSV, HEADER FALSE);")
     print(f"✅ Watermark updated to {new_time_str}")
 
+
+def delete_raw_files_for_prefix(bucket, prefix):
+    """Safely deletes all files under a specific S3 prefix in batches of 1000."""
+    paginator = s3_client.get_paginator('list_objects_v2')
+    pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
+
+    deleted_count = 0
+    for page in pages:
+        if 'Contents' in page:
+            objects_to_delete = [{'Key': obj['Key']} for obj in page['Contents']]
+            s3_client.delete_objects(
+                Bucket=bucket,
+                Delete={'Objects': objects_to_delete, 'Quiet': True}
+            )
+            deleted_count += len(objects_to_delete)
+
+    return deleted_count
+
+
 def main():
     con = setup_duckdb()
     current_watermark = get_current_watermark(con)
@@ -121,6 +162,13 @@ def main():
                 """)
                 print(f"  -> [{category}] Successfully wrote {compacted_path}")
 
+                if DELETE_RAW_FILES:
+                    raw_prefix = f"raw/{category}/year={y}/month={m}/day={d}/hour={h}/"
+                    deleted = delete_raw_files_for_prefix(BUCKET, raw_prefix)
+                    print(f"  -> [{category}] Swept up {deleted} raw files.")
+                else:
+                    print(f"  -> [{category}] Skipped raw file deletion (flag disabled).")
+
             except Exception as e:
                 if "No files found" in str(e):
                     print(f"  -> [{category}] No raw files found for this hour. Skipping safely.")
@@ -128,7 +176,6 @@ def main():
                     raise e
 
         processing_time += timedelta(hours=1)
-        # Format it back to a standard string for the CSV file
         update_watermark(con, processing_time.strftime("%Y-%m-%d %H:%M:%S"))
 
     print("🎉 All backlog compacted successfully!")
