@@ -28,10 +28,10 @@ if MODE not in ("hourly", "daily"):
 CATEGORIES_ENV = os.getenv("CATEGORIES", "containers")
 CATEGORIES = [c.strip() for c in CATEGORIES_ENV.split(",") if c.strip()]
 
-# hourly mode: delete raw source files after compacting each hour
-DELETE_RAW_FILES    = os.getenv("DELETE_RAW_FILES",    "false").lower() in ("true", "1", "yes")
-# daily mode: delete hourly-compacted files after merging each day
-DELETE_HOURLY_FILES = os.getenv("DELETE_HOURLY_FILES", "false").lower() in ("true", "1", "yes")
+# Delete source files after compaction in either mode:
+#   hourly mode -> deletes raw files after each hour is compacted
+#   daily  mode -> deletes hourly files after each day is merged
+DELETE_FILES = os.getenv("DELETE_FILES", "false").lower() in ("true", "1", "yes")
 
 HOURLY_PREFIX = os.getenv("HOURLY_PREFIX", "hourly").strip("/")
 DAILY_PREFIX = os.getenv("DAILY_PREFIX", "daily").strip("/")
@@ -81,18 +81,17 @@ def elapsed(since: float) -> str:
 # ---------------------------------------------------------------------------
 
 s3_client = None
-if DELETE_RAW_FILES or DELETE_HOURLY_FILES:
+if DELETE_FILES:
     boto3_kwargs = {}
     if raw_endpoint:
         boto3_kwargs["endpoint_url"] = f"https://{S3_ENDPOINT}"
     if S3_REGION:
         boto3_kwargs["region_name"] = S3_REGION
 
-    flags = ", ".join(f for f, v in [("DELETE_RAW_FILES", DELETE_RAW_FILES), ("DELETE_HOURLY_FILES", DELETE_HOURLY_FILES)] if v)
-    log(f"File deletion is ENABLED ({flags}). Initializing boto3 client...")
+    log("File deletion is ENABLED. Initializing boto3 client...")
     s3_client = boto3.client("s3", **boto3_kwargs)
 else:
-    log("File deletion is DISABLED. Set DELETE_RAW_FILES or DELETE_HOURLY_FILES to enable.")
+    log("File deletion is DISABLED. Set DELETE_FILES=true to enable.")
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +283,7 @@ def compact_hour(con, processing_time: datetime, timing_stats: dict):
             timing_stats["compaction"] += time.monotonic() - t0
             log(f"[{category}] Written -> {compacted_path} ({elapsed(t0)})", indent=1)
 
-            if DELETE_RAW_FILES:
+            if DELETE_FILES:
                 raw_prefix = f"raw/{category}/year={y}/month={m}/day={d}/hour={h}/"
                 t1 = time.monotonic()
                 deleted = delete_raw_files_for_prefix(BUCKET, raw_prefix)
@@ -340,7 +339,7 @@ def compact_day(con, day: datetime, timing_stats: dict):
             timing_stats["daily_compaction"] += time.monotonic() - t0
             log(f"[{category}] Written -> {daily_path} ({elapsed(t0)})", indent=1)
 
-            if DELETE_HOURLY_FILES:
+            if DELETE_FILES:
                 hourly_prefix = f"{HOURLY_PREFIX}/{category}/year={y}/month={m}/day={d}/"
                 t1 = time.monotonic()
                 deleted = delete_raw_files_for_prefix(BUCKET, hourly_prefix)
@@ -385,6 +384,7 @@ def main():
         log(f"Mode            : hourly")
         log(f"Hourly prefix   : {HOURLY_PREFIX}/")
         log(f"Watermark       : {'enabled' if WATERMARK_ENABLED else 'disabled'}")
+        log(f"Delete files    : {'enabled' if DELETE_FILES else 'disabled'}")
 
         current_hour = now.replace(minute=0, second=0, microsecond=0)
 
@@ -421,7 +421,7 @@ def main():
         log(f"Hourly prefix   : {HOURLY_PREFIX}/")
         log(f"Daily prefix    : {DAILY_PREFIX}/")
         log(f"Watermark       : {'enabled' if WATERMARK_ENABLED else 'disabled'}")
-        log(f"Delete hourly   : {'enabled' if DELETE_HOURLY_FILES else 'disabled'}")
+        log(f"Delete files    : {'enabled' if DELETE_FILES else 'disabled'}")
 
         # Daily runs at 01:30; "yesterday" is always the day before today UTC.
         today = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -457,11 +457,11 @@ def main():
 
     if MODE == "hourly":
         log(f"Compaction time  : {timing_stats['compaction']:.1f}s")
-        if DELETE_RAW_FILES:
+        if DELETE_FILES:
             log(f"Deletion time    : {timing_stats['deletion']:.1f}s")
     else:
         log(f"Daily merge time : {timing_stats['daily_compaction']:.1f}s")
-        if DELETE_HOURLY_FILES:
+        if DELETE_FILES:
             log(f"Deletion time    : {timing_stats['hourly_deletion']:.1f}s")
 
     log(f"Total time       : {total_elapsed:.1f}s")
